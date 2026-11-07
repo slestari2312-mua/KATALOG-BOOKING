@@ -1,0 +1,1466 @@
+node_modules/
+dist/
+.env
+.DS_Store
+
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { SUPABASE_URL, SUPABASE_ANON_KEY, BUSINESS_WHATSAPP, STORAGE_BUCKET } from './config.js';
+const configured = !SUPABASE_URL.includes('YOUR-PROJECT') && !SUPABASE_ANON_KEY.includes('YOUR-');
+const db = configured ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) : null;
+const $ = s => document.querySelector(s);
+let settings = {regular_price:200000,daily_capacity:3,whatsapp_number:BUSINESS_WHATSAPP}, calendar, adminCalendar;
+const fmt = n => new Intl.NumberFormat('id-ID').format(Number(n||0));
+const esc = s => String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const msg = (id,text) => { const e=$(id); if(e)e.textContent=text; };
+const wa = text => { const n=String(settings.whatsapp_number||BUSINESS_WHATSAPP).replace(/\D/g,''); return n && !n.includes('xxxxxxxx') ? `https://wa.me/${n}?text=${encodeURIComponent(text)}` : '#'; };
+function modal(id,on=true){$(id).classList.toggle('open',on)}
+function updateContactLinks(){ $('#weddingLink').href=wa('Halo BYSL_MUA, saya ingin konsultasi layanan Wedding Makeup.'); $('#footerWa').href=wa('Halo BYSL_MUA, saya ingin bertanya tentang layanan makeup.'); }
+async function loadSettings(){
+ if(!db){updateContactLinks();return}
+ const {data,error}=await db.from('site_settings').select('key,value'); if(error){console.error(error);return}
+ for(const r of data||[]) settings[r.key]=r.value;
+ $('#regularPrice').textContent=`Rp ${fmt(settings.regular_price)}`;
+ $('#serviceType option:first-child').textContent=`Regular Makeup — Rp ${fmt(settings.regular_price)}`;
+ $('#aboutCopy').textContent=settings.about_text||$('#aboutCopy').textContent;
+ $('#contentForm [name=brand_name]').value=settings.brand_name||'MAKEUP ARTIST BY Siti Lestari';
+ $('#contentForm [name=regular_price]').value=settings.regular_price||200000;
+ $('#contentForm [name=daily_capacity]').value=settings.daily_capacity||3;
+ $('#contentForm [name=whatsapp_number]').value=settings.whatsapp_number||'';
+ $('#contentForm [name=instagram]').value=settings.instagram||'';
+ $('#contentForm [name=about_text]').value=settings.about_text||'';
+ updateContactLinks();
+}
+async function loadPortfolio(){
+ if(!db)return; const {data,error}=await db.from('portfolio').select('id,image_url,caption').order('created_at',{ascending:false}); if(error){console.error(error);return}
+ $('#portfolioGrid').innerHTML=(data||[]).length?(data||[]).map(p=>`<article class="portfolio-item"><img src="${esc(p.image_url)}" alt="${esc(p.caption||'Portfolio BYSL_MUA')}"><p>${esc(p.caption||'BYSL_MUA')}</p></article>`).join(''):'<div class="empty">Portfolio photos will appear here.</div>';
+}
+async function calendarEvents(start,end){
+ if(!db)return [];
+ const {data,error}=await db.rpc('get_public_calendar',{start_date:start,end_date:end});
+ if(error){console.error('Calendar RPC:',error);return []}
+ return (data||[]).map(r=>{const used=Number(r.booked_count||0),cap=Number(r.daily_capacity||settings.daily_capacity||3),pending=Number(r.pending_count||0),status=r.blocked?'blocked':used>=cap?'booked':pending?'pending':'available';
+ const title=status==='blocked'?'Unavailable':status==='booked'?'Fully booked':status==='pending'?`Pending · ${pending}`:`Available · ${Math.max(0,cap-used)} slot`;
+ return {id:r.event_date,title,start:r.event_date,allDay:true,classNames:[`event-${status}`],extendedProps:{status,used,cap,pending}};
+ });
+}
+async function makeCalendar(el,isAdmin=false){
+ const c=new FullCalendar.Calendar(el,{initialView:'dayGridMonth',height:'auto',locale:'id',headerToolbar:{left:'prev,next today',center:'title',right:''},buttonText:{today:'Hari ini'},events:async(info,success)=>{const start=info.startStr.slice(0,10),end=info.endStr.slice(0,10);if(isAdmin){const {data,error}=await db.from('bookings').select('id,event_date,status,customer_name,service_type').gte('event_date',start).lte('event_date',end).in('status',['pending','booked','blocked']);if(error){console.error(error);success([]);return}success((data||[]).map(b=>({id:b.id,title:b.status==='pending'?'Pending':b.status==='blocked'?'Unavailable':`Booked · ${b.customer_name}`,start:b.event_date,allDay:true,classNames:[`event-${b.status}`],extendedProps:b})));}else success(await calendarEvents(start,end));},dateClick:info=>{if(!isAdmin)openBooking(info.dateStr)},eventClick:info=>{if(isAdmin)adminEvent(info.event);else if(info.event.extendedProps.status==='available'||info.event.extendedProps.status==='pending')openBooking(info.event.startStr)}});c.render();return c;
+}
+function openBooking(date){$('#eventDate').value=date;$('#chosenDate').textContent=new Date(date+'T00:00:00').toLocaleDateString('id-ID',{weekday:'long',day:'numeric',month:'long',year:'numeric'});msg('#bookingMessage','');modal('#bookingModal')}
+$('#bookingForm').addEventListener('submit',async e=>{
+ e.preventDefault();if(!db){msg('#bookingMessage','Website belum terhubung ke Supabase. Lengkapi config.js terlebih dahulu.');return}
+ const f=new FormData(e.currentTarget),v=Object.fromEntries(f.entries()),button=$('#sendBooking');button.disabled=true;button.textContent='Mengirim...';
+ try{
+  const {data,error}=await db.rpc('create_booking_request',{p_customer_name:v.customer_name,p_whatsapp:v.whatsapp,p_event_date:v.event_date,p_event_time:v.event_time,p_service_type:v.service_type,p_event_type:v.event_type,p_location:v.location,p_notes:v.notes||''});
+  if(error)throw error;
+  msg('#bookingMessage','Permintaan berhasil dikirim dan berstatus Pending. Mengalihkan ke WhatsApp...');
+  const text=`Halo BYSL_MUA, saya sudah mengirim permintaan booking melalui website.\nNama: ${v.customer_name}\nWhatsApp: ${v.whatsapp}\nTanggal: ${v.event_date}\nJam: ${v.event_time}\nLayanan: ${v.service_type}\nAcara: ${v.event_type}\nLokasi: ${v.location}\nCatatan: ${v.notes||'-'}\nMohon info langkah pembayaran DP. Saya memahami booking menunggu persetujuan admin.`;
+  const link=wa(text); if(link!=='#')window.open(link,'_blank','noopener'); calendar?.refetchEvents(); setTimeout(()=>modal('#bookingModal',false),1300);
+ }catch(err){console.error(err);msg('#bookingMessage',err.message||'Gagal mengirim. Silakan coba lagi.')}finally{button.disabled=false;button.textContent='Kirim permintaan & lanjut WhatsApp'}
+});
+async function adminCheck(){const {data}=await db.auth.getUser();if(!data.user)return false;const {data:ok,error}=await db.rpc('is_current_user_bysl_admin');return !error&&ok===true}
+async function openDashboard(){if(!db){modal('#loginModal');msg('#loginMessage','Konfigurasi Supabase belum diisi.');return}const {data}=await db.auth.getSession();if(!data.session){modal('#loginModal');return}if(!await adminCheck()){msg('#loginMessage','Akun belum terdaftar sebagai admin.');await db.auth.signOut();modal('#loginModal');return}$('#dashboard').classList.add('open');await loadRequests();await loadAdminPortfolio();if(!adminCalendar)adminCalendar=await makeCalendar($('#adminCalendar'),true);else adminCalendar.refetchEvents()}
+$('#loginForm').addEventListener('submit',async e=>{e.preventDefault();if(!db)return;const f=new FormData(e.currentTarget);const {error}=await db.auth.signInWithPassword({email:f.get('email'),password:f.get('password')});if(error){msg('#loginMessage',error.message);return}modal('#loginModal',false);await openDashboard()});
+$('#logout').addEventListener('click',async()=>{await db.auth.signOut();$('#dashboard').classList.remove('open')});
+async function loadRequests(){const el=$('#requestsList');el.textContent='Loading...';const {data,error}=await db.from('bookings').select('*').order('created_at',{ascending:false});if(error){el.textContent=error.message;return}if(!data?.length){el.textContent='Belum ada permintaan booking.';return}el.innerHTML=data.map(b=>`<article class="request"><h4>${esc(b.customer_name)} · ${esc(b.service_type)}</h4><p><b>${esc(b.event_date)} ${esc(b.event_time||'')}</b><br>${esc(b.event_type||'')} · ${esc(b.location||'')}<br>WhatsApp: ${esc(b.whatsapp||'')}<br>Status: <b>${esc(b.status)}</b><br>Catatan: ${esc(b.notes||'-')}</p><div class="request-actions">${b.status==='pending'?`<button class="btn dark" data-act="approve" data-id="${b.id}">Approve (DP verified)</button><button class="btn outline" data-act="reject" data-id="${b.id}">Reject</button>`:''}<button class="btn outline" data-act="delete" data-id="${b.id}">Delete</button></div></article>`).join('');el.querySelectorAll('button').forEach(b=>b.addEventListener('click',()=>bookingAction(b.dataset.id,b.dataset.act)))}
+async function bookingAction(id,action){if(action==='delete'&&!confirm('Hapus booking ini?'))return;let result;if(action==='approve')result=await db.rpc('approve_booking',{p_booking_id:id});else if(action==='reject')result=await db.from('bookings').update({status:'rejected'}).eq('id',id);else result=await db.from('bookings').delete().eq('id',id);if(result.error)alert(result.error.message);else if(result.data?.ok===false)alert(result.data.message||'Tidak dapat menyetujui booking.');await loadRequests();calendar?.refetchEvents();adminCalendar?.refetchEvents()}
+function adminEvent(ev){const p=ev.extendedProps;if(confirm(`${ev.title} · ${ev.startStr}\n${p.customer_name||''}\nHapus entri ini?`)){db.from('bookings').delete().eq('id',ev.id).then(({error})=>{if(error)alert(error.message);loadRequests();calendar?.refetchEvents();adminCalendar?.refetchEvents()})}}
+$('#manualForm').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.currentTarget);const {error}=await db.from('bookings').insert({customer_name:f.get('customer_name'),event_date:f.get('event_date'),status:f.get('status'),notes:f.get('notes'),service_type:'Admin entry'});if(error)alert(error.message);else{alert('Kalender diperbarui.');e.currentTarget.reset();calendar?.refetchEvents();adminCalendar?.refetchEvents()}});
+$('#contentForm').addEventListener('submit',async e=>{e.preventDefault();const f=new FormData(e.currentTarget),values={brand_name:f.get('brand_name'),regular_price:Number(f.get('regular_price')),daily_capacity:Number(f.get('daily_capacity')),whatsapp_number:f.get('whatsapp_number'),instagram:f.get('instagram'),about_text:f.get('about_text')};for(const [key,value] of Object.entries(values)){const {error}=await db.from('site_settings').upsert({key,value},{onConflict:'key'});if(error){alert(error.message);return}}await loadSettings();calendar?.refetchEvents();alert('Pengaturan berhasil disimpan.')});
+async function upload(file,path){const {error}=await db.storage.from(STORAGE_BUCKET).upload(path,file,{upsert:false,contentType:file.type});if(error)throw error;return db.storage.from(STORAGE_BUCKET).getPublicUrl(path).data.publicUrl}
+$('#logoForm').addEventListener('submit',async e=>{e.preventDefault();const file=e.currentTarget.logo.files[0];if(!file)return;try{const path=`logo/${Date.now()}-${file.name.replace(/[^\w.-]/g,'_')}`,url=await upload(file,path);const {error}=await db.from('site_settings').upsert({key:'logo_url',value:url},{onConflict:'key'});if(error)throw error;alert('Logo tersimpan. Penggunaan gambar logo pada header akan ditambahkan pada tahap penyesuaian akhir.')}catch(err){alert(err.message)}});
+$('#portfolioForm').addEventListener('submit',async e=>{e.preventDefault();const file=e.currentTarget.photo.files[0];if(!file)return;try{const path=`gallery/${Date.now()}-${file.name.replace(/[^\w.-]/g,'_')}`,url=await upload(file,path);const {error}=await db.from('portfolio').insert({image_url:url,storage_path:path,caption:e.currentTarget.caption.value});if(error)throw error;e.currentTarget.reset();await loadPortfolio();await loadAdminPortfolio();alert('Foto portfolio berhasil diunggah.')}catch(err){alert(err.message)}});
+async function loadAdminPortfolio(){const {data,error}=await db.from('portfolio').select('*').order('created_at',{ascending:false});if(error)return;$('#adminPortfolio').innerHTML=(data||[]).map(p=>`<div class="admin-portfolio-item"><img src="${esc(p.image_url)}"><button class="btn outline" data-id="${p.id}" data-path="${esc(p.storage_path||'')}">Delete</button></div>`).join('');$('#adminPortfolio').querySelectorAll('button').forEach(b=>b.addEventListener('click',async()=>{if(!confirm('Hapus foto ini?'))return;const {error}=await db.from('portfolio').delete().eq('id',b.dataset.id);if(error){alert(error.message);return}if(b.dataset.path)await db.storage.from(STORAGE_BUCKET).remove([b.dataset.path]);await loadPortfolio();await loadAdminPortfolio()}))}
+$('#refresh').addEventListener('click',loadRequests);document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{document.querySelectorAll('.tab,.tab-panel').forEach(x=>x.classList.remove('active'));t.classList.add('active');$('#panel-'+t.dataset.tab).classList.add('active');adminCalendar?.updateSize()}));
+$('#adminShortcut').addEventListener('click',openDashboard);$('#closeDashboard').addEventListener('click',()=>$('#dashboard').classList.remove('open'));$('#closeBooking').addEventListener('click',()=>modal('#bookingModal',false));$('#closeLogin').addEventListener('click',()=>modal('#loginModal',false));$('#hamb').addEventListener('click',()=>$('#nav').classList.toggle('open'));document.querySelectorAll('#nav a').forEach(a=>a.addEventListener('click',()=>$('#nav').classList.remove('open')));$('#year').textContent=new Date().getFullYear();
+if(!configured){console.info('BYSL_MUA: isi config.js untuk mengaktifkan backend Supabase.')}else{await loadSettings();await loadPortfolio();}
+calendar=await makeCalendar($('#calendar'));
+
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#f7f1e9">
+<title>BYSL_MUA | Makeup Artist by Siti Lestari</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@500;600;700&display=swap" rel="stylesheet">
+<link href="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.css" rel="stylesheet"><link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="header"><a class="brand" href="#home"><span class="monogram">BYSL</span><span><b>MAKEUP ARTIST</b><small>BY SITI LESTARI</small></span></a><button class="hamb" id="hamb">☰</button><nav id="nav"><a href="#home">Home</a><a href="#about">About</a><a href="#portfolio">Portfolio</a><a href="#services">Services & Price</a><a href="#booking">Booking</a></nav></header>
+<main>
+<section class="hero" id="home"><div><p class="eyebrow">MAKEUP ARTIST · BYSL_MUA</p><h1>Feel beautiful.<br><em>Be unforgettable.</em></h1><p class="lead">Your special moments deserve a makeup look that feels like you — elegant, confident, and effortlessly beautiful.</p><div class="actions"><a class="btn dark" href="#booking">Book Your Date</a><a class="link" href="#portfolio">Explore portfolio ↗</a></div><p class="signature">Makeup Artist by Siti Lestari</p></div><div class="hero-visual"><div class="hero-frame"><div class="visual-placeholder">BYSL_MUA<small>YOUR BEAUTY, OUR ART</small></div></div><div class="seal">BEAUTY<br>IN EVERY<br>DETAIL</div></div></section>
+<section class="section intro" id="about"><p class="eyebrow">A LITTLE INTRODUCTION</p><h2>Beauty that celebrates <em>you.</em></h2><p class="intro-copy" id="aboutCopy">Hi, I'm Siti Lestari — a makeup artist who loves creating beautiful looks for your meaningful moments. From soft and natural to polished glam, let's create a look that makes you feel your best.</p><span class="rule"></span><small class="caps">MAKEUP ARTIST BY SITI LESTARI</small></section>
+<section class="section portfolio" id="portfolio"><div class="section-head"><div><p class="eyebrow">THE ART OF MAKEUP</p><h2>Selected <em>Portfolio</em></h2></div><p class="muted">A collection of looks created with love.</p></div><div class="portfolio-grid" id="portfolioGrid"><div class="empty">Portfolio photos will appear here.</div></div></section>
+<section class="section services" id="services"><div class="section-head"><div><p class="eyebrow">MADE FOR YOUR MOMENTS</p><h2>Services & <em>Price</em></h2></div><p class="muted">Choose the service that fits your special day.</p></div><div class="service-grid"><article class="service"><div class="service-cover regular"><span>01 / REGULAR</span></div><div class="service-content"><p class="eyebrow">GRADUATION · ENGAGEMENT · PARTY</p><h3>Regular Makeup</h3><p>For graduation, engagement, bridesmaid, party, photoshoot, and other special occasions.</p><div class="price" id="regularPrice">Rp 200.000</div><a class="btn outline" href="#booking">Book Regular Makeup</a></div></article><article class="service"><div class="service-cover wedding"><span>02 / WEDDING</span></div><div class="service-content"><p class="eyebrow">YOUR ONCE-IN-A-LIFETIME MOMENT</p><h3>Wedding Makeup</h3><p>Wedding makeup is available by consultation. Let's discuss your needs, concept, and date.</p><div class="price">By Consultation</div><a class="btn outline" id="weddingLink" href="#">Consult via WhatsApp</a></div></article></div></section>
+<section class="section booking" id="booking"><div class="section-head"><div><p class="eyebrow">LET'S SAVE YOUR DATE</p><h2>Booking <em>Calendar</em></h2></div><p class="muted">Pilih tanggal dan ajukan permintaan booking.</p></div><div class="legend"><span><i class="available"></i> Available</span><span><i class="pending"></i> Pending (belum mengunci slot)</span><span><i class="booked"></i> Booked</span><span><i class="blocked"></i> Unavailable</span></div><div class="calendar-box"><div id="calendar"></div></div><p class="note">Satu tanggal dapat menerima beberapa booking sesuai kapasitas harian. Permintaan Pending belum dihitung sebagai booking terkonfirmasi. Slot berkurang setelah DP diverifikasi dan admin menyetujui booking.</p></section>
+</main>
+<footer class="footer"><div><span class="monogram">BYSL</span><p>MAKEUP ARTIST BY SITI LESTARI</p></div><p>Beauty for your most meaningful moments.</p><a id="footerWa" href="#">WhatsApp ↗</a><small>© <span id="year"></span> BYSL_MUA. All rights reserved.</small></footer>
+<div class="backdrop" id="bookingModal"><section class="modal"><button class="x" id="closeBooking">×</button><p class="eyebrow">BOOKING REQUEST</p><h2>Let's book your <em>date.</em></h2><p class="muted" id="chosenDate"></p><form id="bookingForm"><label>Nama lengkap<input name="customer_name" required maxlength="100" placeholder="Nama Anda"></label><label>Nomor WhatsApp<input name="whatsapp" required inputmode="tel" maxlength="30" placeholder="08xxxxxxxxxx"></label><label>Tanggal acara<input name="event_date" id="eventDate" type="date" required></label><label>Jam acara<input name="event_time" type="time" required></label><label>Jenis layanan<select name="service_type" id="serviceType"><option value="Regular Makeup">Regular Makeup — Rp 200.000</option><option value="Wedding Makeup">Wedding Makeup — konsultasi</option></select></label><label>Jenis acara<input name="event_type" required placeholder="Graduation / Engagement"></label><label>Lokasi acara<textarea name="location" rows="2" required placeholder="Alamat / nama gedung"></textarea></label><label>Catatan tambahan<textarea name="notes" rows="2" placeholder="Opsional"></textarea></label><button class="btn dark full" type="submit" id="sendBooking">Kirim permintaan & lanjut WhatsApp</button><p class="hint">Permintaan berstatus Pending sampai admin memverifikasi DP dan menyetujui booking.</p><p class="message" id="bookingMessage"></p></form></section></div>
+<div class="backdrop" id="loginModal"><section class="modal compact"><button class="x" id="closeLogin">×</button><p class="eyebrow">PRIVATE AREA</p><h2>Admin <em>Login</em></h2><form id="loginForm"><label>Email<input name="email" type="email" required></label><label>Password<input name="password" type="password" required></label><button class="btn dark full">Login to Dashboard</button><p class="message" id="loginMessage"></p></form></section></div>
+<section class="dashboard" id="dashboard"><div class="dash-top"><div><p class="eyebrow">BYSL_MUA · PRIVATE AREA</p><h2>Admin <em>Dashboard</em></h2></div><button class="btn outline" id="logout">Logout</button></div><div class="tabs"><button class="tab active" data-tab="requests">Booking Requests</button><button class="tab" data-tab="calendarAdmin">Manage Calendar</button><button class="tab" data-tab="contentAdmin">Website Content</button></div>
+<div class="tab-panel active" id="panel-requests"><div class="panel-head"><h3>Booking Requests</h3><button class="btn outline" id="refresh">Refresh</button></div><div id="requestsList" class="requests">Loading...</div></div>
+<div class="tab-panel" id="panel-calendarAdmin"><h3>Calendar Management</h3><form id="manualForm" class="admin-form"><h4>Add booking / block date</h4><div class="form-grid"><label>Nama / label<input name="customer_name" required></label><label>Tanggal<input name="event_date" type="date" required></label><label>Status<select name="status"><option value="booked">Booked</option><option value="blocked">Unavailable / personal day</option></select></label><label>Catatan<input name="notes"></label></div><button class="btn dark">Save calendar entry</button></form><div class="calendar-box"><div id="adminCalendar"></div></div></div>
+<div class="tab-panel" id="panel-contentAdmin"><h3>Website Content</h3><form id="contentForm" class="admin-form"><h4>Brand, contact & services</h4><div class="form-grid"><label>Nama brand<input name="brand_name"></label><label>Harga Regular Makeup (Rp)<input name="regular_price" type="number" min="0" value="200000"></label><label>Kapasitas booking per tanggal<input name="daily_capacity" type="number" min="1" max="30" value="3"></label><label>WhatsApp bisnis (format 62...)<input name="whatsapp_number" placeholder="628xxxxxxxxxx"></label><label>Instagram<input name="instagram" placeholder="@bysl_mua"></label><label class="wide">Deskripsi About<textarea name="about_text" rows="3"></textarea></label></div><button class="btn dark">Save content</button></form><form id="logoForm" class="admin-form"><h4>Logo</h4><label>Upload logo<input type="file" name="logo" accept="image/png,image/jpeg,image/svg+xml"></label><button class="btn outline">Upload logo</button><p class="hint">Logo tersimpan di Supabase Storage. Tampilan header versi awal masih memakai monogram BYSL.</p></form><form id="portfolioForm" class="admin-form"><h4>Portfolio gallery</h4><label>Upload foto<input type="file" name="photo" accept="image/*" required></label><label>Caption<input name="caption" maxlength="120" placeholder="Soft glam look"></label><button class="btn outline">Upload photo</button><div id="adminPortfolio" class="admin-portfolio"></div></form></div><button class="close-dash" id="closeDashboard">Close dashboard</button></section>
+<button class="admin-shortcut" id="adminShortcut" title="Admin login">✦</button>
+<script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.15/index.global.min.js"></script><script type="module" src="app.js"></script>
+</body></html>
+
+{"name":"bysl-mua-booking","version":"1.0.0","private":true,"scripts":{"dev":"vite --host 0.0.0.0","build":"vite build","preview":"vite preview --host 0.0.0.0"},"devDependencies":{"vite":"^6.0.0"}}
+
+# BYSL_MUA — website booking
+
+Source website responsif untuk **MAKEUP ARTIST BY Siti Lestari / BYSL_MUA**.
+
+## Pilihan yang sudah diterapkan
+- Kapasitas awal **3 booking terkonfirmasi per tanggal**; admin bisa mengubah kapasitas 1–30 melalui dashboard.
+- Booking pelanggan masuk sebagai **Pending**. Pending tidak mengurangi kapasitas dan tidak mengunci slot.
+- Admin memverifikasi DP lalu menekan **Approve**. Fungsi database memeriksa kapasitas secara atomik sebelum mengubah status menjadi Booked.
+- Satu tanggal bisa memiliki beberapa booking terkonfirmasi hingga kapasitasnya tercapai.
+- Website menggunakan subdomain Netlify gratis (`*.netlify.app`); nama subdomain dipilih saat deploy dan perlu dicek ketersediaannya.
+- Regular Makeup Rp200.000; Wedding Makeup konsultasi melalui WhatsApp.
+
+## 1. Siapkan backend Supabase
+1. Buat project di https://supabase.com/.
+2. Buka **SQL Editor**, jalankan seluruh isi `schema.sql`.
+3. Buka **Authentication → Users → Add user**. Buat akun admin menggunakan email dan password yang aman.
+4. Salin UUID user admin. Di SQL Editor jalankan:
+   ```sql
+   insert into public.admin_users(user_id) values ('UUID-ADMIN-DARI-AUTH-USERS');
+   ```
+5. Buka **Project Settings → API**. Salin Project URL dan anon/public key.
+6. Edit `config.js` dan isi `SUPABASE_URL`, `SUPABASE_ANON_KEY`, dan `BUSINESS_WHATSAPP` dengan nomor WA bisnis format `628...` tanpa `+`.
+7. Jangan pernah menaruh `service_role` key di file frontend.
+
+## 2. Uji website di komputer
+Butuh Node.js terpasang.
+```bash
+npm install
+npm run dev
+```
+Buka URL lokal yang ditampilkan Vite. File HTML tidak disarankan dibuka langsung sebagai `file://` karena website menggunakan JavaScript modules.
+
+## 3. Deploy gratis ke Netlify
+1. Buat repository GitHub baru dan unggah seluruh file project ini (termasuk `config.js` yang sudah diisi).
+2. Masuk Netlify → **Add new site** → **Import an existing project** → pilih repository GitHub.
+3. Build command: `npm run build`; Publish directory: `dist`.
+4. Deploy. Netlify akan memberikan subdomain `nama-pilihan.netlify.app`; pilih nama yang masih tersedia.
+
+## Dashboard admin
+Klik ikon ✦ kecil di kanan bawah website. Login dengan user yang dibuat di Supabase dan sudah dimasukkan ke tabel `admin_users`.
+- Booking Requests: lihat data pelanggan, approve setelah DP diverifikasi, reject, delete.
+- Manage Calendar: tambahkan booking manual atau blok tanggal pribadi/off.
+- Website Content: ubah harga regular, kapasitas harian, nomor WhatsApp, Instagram, deskripsi About.
+- Portfolio: unggah dan hapus foto.
+
+## Catatan operasional
+- Kalender publik hanya memanggil RPC `get_public_calendar` yang mengembalikan tanggal, hitungan booking, kapasitas, dan status blokir; tidak membuka nama, nomor WA, atau catatan pelanggan.
+- Permintaan pending tidak menahan slot. Jika beberapa permintaan masuk pada hari yang sama, admin dapat menyetujui sampai batas kapasitas. Permintaan berikutnya akan ditolak otomatis saat kapasitas sudah penuh.
+- Logo bisa diunggah dan disimpan dari dashboard. Header versi awal masih memakai monogram teks BYSL; pengaitan logo gambar ke header merupakan penyempurnaan visual terpisah.
+- Nomor WA, foto portofolio, logo, dan akun admin adalah data pemilik yang perlu diisi sebelum dipublikasikan.
+
+-- BYSL_MUA schema. Run the whole file in Supabase SQL Editor.
+create extension if not exists pgcrypto;
+
+create table if not exists public.admin_users (
+  user_id uuid primary key references auth.users(id) on delete cascade,
+  created_at timestamptz not null default now()
+);
+create table if not exists public.bookings (
+  id uuid primary key default gen_random_uuid(),
+  customer_name text not null,
+  whatsapp text,
+  event_date date not null,
+  event_time time,
+  service_type text not null,
+  event_type text,
+  location text,
+  notes text,
+  status text not null default 'pending' check(status in ('pending','booked','blocked','rejected')),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists bookings_date_status_idx on public.bookings(event_date,status);
+create table if not exists public.site_settings (
+  key text primary key,
+  value jsonb not null,
+  updated_at timestamptz not null default now()
+);
+create table if not exists public.portfolio (
+  id uuid primary key default gen_random_uuid(),
+  image_url text not null,
+  storage_path text,
+  caption text,
+  created_at timestamptz not null default now()
+);
+insert into public.site_settings(key,value) values
+ ('brand_name','"MAKEUP ARTIST BY Siti Lestari"'::jsonb),
+ ('regular_price','200000'::jsonb),
+ ('daily_capacity','3'::jsonb),
+ ('whatsapp_number','"628xxxxxxxxxx"'::jsonb),
+ ('instagram','"@bysl_mua"'::jsonb),
+ ('about_text','"Hi, I''m Siti Lestari — a makeup artist who loves creating beautiful looks for your meaningful moments."'::jsonb)
+on conflict(key) do nothing;
+
+alter table public.admin_users enable row level security;
+alter table public.bookings enable row level security;
+alter table public.site_settings enable row level security;
+alter table public.portfolio enable row level security;
+
+create or replace function public.is_bysl_admin()
+returns boolean language sql stable security definer set search_path=public,auth as $$
+ select exists(select 1 from public.admin_users where user_id=auth.uid());
+$$;
+revoke all on function public.is_bysl_admin() from public;
+grant execute on function public.is_bysl_admin() to authenticated;
+create or replace function public.is_current_user_bysl_admin()
+returns boolean language sql stable security definer set search_path=public,auth as $$ select public.is_bysl_admin(); $$;
+grant execute on function public.is_current_user_bysl_admin() to authenticated;
+
+-- Booking privacy: public can INSERT pending only; customer details are never publicly selectable.
+create policy "public create pending booking" on public.bookings for insert to anon,authenticated with check(status='pending');
+create policy "admin read bookings" on public.bookings for select to authenticated using(public.is_bysl_admin());
+create policy "admin update bookings" on public.bookings for update to authenticated using(public.is_bysl_admin()) with check(public.is_bysl_admin());
+create policy "admin delete bookings" on public.bookings for delete to authenticated using(public.is_bysl_admin());
+create policy "admin insert bookings" on public.bookings for insert to authenticated with check(public.is_bysl_admin());
+
+create policy "public read site settings" on public.site_settings for select to anon,authenticated using(true);
+create policy "admin write site settings" on public.site_settings for all to authenticated using(public.is_bysl_admin()) with check(public.is_bysl_admin());
+create policy "public read portfolio" on public.portfolio for select to anon,authenticated using(true);
+create policy "admin manage portfolio" on public.portfolio for all to authenticated using(public.is_bysl_admin()) with check(public.is_bysl_admin());
+
+-- Public-safe calendar response: only date, counts and availability; no names, phone numbers or notes.
+create or replace function public.get_public_calendar(start_date date,end_date date)
+returns table(event_date date,booked_count bigint,pending_count bigint,daily_capacity integer,blocked boolean)
+language sql stable security definer set search_path=public as $$
+ with cap as (select coalesce((select (value #>> '{}')::int from public.site_settings where key='daily_capacity'),3) as n),
+ days as (select b.event_date,
+   count(*) filter(where b.status='booked') as booked_count,
+   count(*) filter(where b.status='pending') as pending_count,
+   bool_or(b.status='blocked') as blocked
+   from public.bookings b where b.event_date between start_date and end_date and b.status in ('pending','booked','blocked') group by b.event_date)
+ select d.event_date,d.booked_count,d.pending_count,cap.n,coalesce(d.blocked,false) from days d cross join cap
+ union all
+ select g::date,0::bigint,0::bigint,cap.n,false from generate_series(start_date,end_date,interval '1 day') g cross join cap
+ where not exists(select 1 from days d where d.event_date=g::date);
+$$;
+grant execute on function public.get_public_calendar(date,date) to anon,authenticated;
+
+-- Public booking creation. Pending requests do not consume confirmed daily capacity.
+create or replace function public.create_booking_request(
+ p_customer_name text,p_whatsapp text,p_event_date date,p_event_time time,p_service_type text,p_event_type text,p_location text,p_notes text default ''
+) returns uuid language plpgsql security definer set search_path=public as $$
+declare new_id uuid;
+begin
+ if p_event_date < current_date then raise exception 'Tanggal acara tidak boleh di masa lalu.'; end if;
+ if length(trim(coalesce(p_customer_name,'')))=0 or length(trim(coalesce(p_whatsapp,'')))=0 then raise exception 'Nama dan nomor WhatsApp wajib diisi.'; end if;
+ if exists(select 1 from public.bookings where event_date=p_event_date and status='blocked') then raise exception 'Tanggal ini tidak menerima booking. Silakan pilih tanggal lain.'; end if;
+ if (select count(*) from public.bookings where event_date=p_event_date and status='booked') >= coalesce((select (value #>> '{}')::int from public.site_settings where key='daily_capacity'),3) then raise exception 'Kapasitas tanggal ini sudah penuh. Silakan pilih tanggal lain.'; end if;
+ insert into public.bookings(customer_name,whatsapp,event_date,event_time,service_type,event_type,location,notes,status)
+ values(trim(p_customer_name),trim(p_whatsapp),p_event_date,p_event_time,trim(p_service_type),trim(p_event_type),trim(p_location),coalesce(p_notes,''),'pending') returning id into new_id;
+ return new_id;
+end; $$;
+grant execute on function public.create_booking_request(text,text,date,time,text,text,text,text) to anon,authenticated;
+
+-- Admin approval is atomic per date. A date can have N approved bookings; pending does not count.
+create or replace function public.approve_booking(p_booking_id uuid)
+returns jsonb language plpgsql security definer set search_path=public as $$
+declare target_date date; capacity_n int; used_n int; current_status text;
+begin
+ if not public.is_bysl_admin() then raise exception 'Akses admin diperlukan.'; end if;
+ select event_date,status into target_date,current_status from public.bookings where id=p_booking_id for update;
+ if target_date is null then raise exception 'Booking tidak ditemukan.'; end if;
+ if current_status <> 'pending' then raise exception 'Hanya permintaan Pending yang dapat disetujui.'; end if;
+ perform pg_advisory_xact_lock(hashtext(target_date::text));
+ select coalesce((select (value #>> '{}')::int from public.site_settings where key='daily_capacity'),3) into capacity_n;
+ select count(*) into used_n from public.bookings where event_date=target_date and status='booked';
+ if exists(select 1 from public.bookings where event_date=target_date and status='blocked') then
+   return jsonb_build_object('ok',false,'message','Tanggal ini diblokir admin.');
+ end if;
+ if used_n >= capacity_n then return jsonb_build_object('ok',false,'message',format('Kapasitas tanggal ini penuh (%s/%s).',used_n,capacity_n)); end if;
+ update public.bookings set status='booked',updated_at=now() where id=p_booking_id;
+ return jsonb_build_object('ok',true,'message','Booking disetujui.');
+end; $$;
+grant execute on function public.approve_booking(uuid) to authenticated;
+
+-- Storage bucket: portfolio images are public to view, admin-only to change.
+insert into storage.buckets(id,name,public) values('portfolio','portfolio',true) on conflict(id) do nothing;
+create policy "public view portfolio files" on storage.objects for select to anon,authenticated using(bucket_id='portfolio');
+create policy "admin upload portfolio files" on storage.objects for insert to authenticated with check(bucket_id='portfolio' and public.is_bysl_admin());
+create policy "admin update portfolio files" on storage.objects for update to authenticated using(bucket_id='portfolio' and public.is_bysl_admin()) with check(bucket_id='portfolio' and public.is_bysl_admin());
+create policy "admin delete portfolio files" on storage.objects for delete to authenticated using(bucket_id='portfolio' and public.is_bysl_admin());
+
+-- After creating the first user under Authentication > Users, add their UUID:
+-- insert into public.admin_users(user_id) values ('PASTE-AUTH-USER-UUID-HERE');
+
+-- Explicit table privileges; row-level security policies above remain the access boundary.
+grant select on public.site_settings, public.portfolio to anon, authenticated;
+grant insert on public.bookings to anon, authenticated;
+grant select, insert, update, delete on public.bookings to authenticated;
+grant insert, update, delete on public.site_settings, public.portfolio to authenticated;
+
+:root{--ivory:#f7f1e9;--paper:#fffdf9;--sand:#e8ddd0;--champ:#c5a98b;--brown:#6c5143;--ink:#332a25;--muted:#897b70;--line:#e9e0d7;--green:#6f9479;--red:#a95f57;--gold:#b58a54}*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--paper);color:var(--ink);font-family:'DM Sans',sans-serif}a{color:inherit;text-decoration:none}.header{height:80px;padding:0 7vw;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;background:#fffdf9ed;z-index:20;border-bottom:1px solid var(--line);backdrop-filter:blur(10px)}.brand{display:flex;gap:12px;align-items:center}.monogram{font:30px 'Playfair Display',serif;letter-spacing:2px;color:var(--brown)}.brand span:last-child{display:flex;flex-direction:column;gap:3px;font-size:10px;letter-spacing:2px}.brand small{font-size:8px;color:var(--muted)}nav{display:flex;gap:28px;font-size:12px;color:#685b51}.hamb{display:none;border:0;background:none;font-size:24px}.hero{background:var(--ivory);min-height:600px;padding:75px 10vw;display:grid;grid-template-columns:1fr 1fr;align-items:center;gap:8vw}.eyebrow{font-size:10px;letter-spacing:2.5px;color:var(--champ);font-weight:700}.hero h1,.section h2,.modal h2,.dashboard h2{font:500 clamp(42px,5vw,67px)/1.12 'Playfair Display',serif;margin:18px 0}.hero h1 em,.section h2 em,.modal h2 em,.dashboard h2 em{color:var(--brown)}.lead{font-size:14px;line-height:1.9;color:var(--muted);max-width:440px}.actions{display:flex;align-items:center;gap:25px;margin-top:30px}.btn{display:inline-flex;align-items:center;justify-content:center;padding:13px 21px;border:1px solid transparent;font:600 10px 'DM Sans',sans-serif;letter-spacing:1px;text-transform:uppercase;cursor:pointer}.dark{background:var(--brown);color:white}.dark:hover{background:#4f3b31}.outline{border-color:#bca997;color:var(--brown);background:transparent}.outline:hover{background:var(--ivory)}.link{font-size:12px;color:var(--brown)}.signature{font:italic 15px 'Playfair Display',serif;color:var(--brown);margin-top:48px}.hero-visual{height:420px;position:relative;display:flex;justify-content:center;align-items:center}.hero-frame{width:76%;height:100%;padding:14px;background:linear-gradient(140deg,#d9c5b2,#9d7f6c);transform:rotate(2deg);box-shadow:0 25px 60px #6b514326}.visual-placeholder{height:100%;border:1px solid #fff8;display:flex;align-items:center;justify-content:center;flex-direction:column;color:#fff8ef;font:38px 'Playfair Display',serif;letter-spacing:4px}.visual-placeholder small{font:9px 'DM Sans';letter-spacing:3px;margin-top:12px}.seal{position:absolute;right:0;bottom:15px;background:var(--paper);border-radius:50%;width:115px;height:115px;display:grid;place-content:center;text-align:center;font:11px/1.5 'Playfair Display';color:var(--brown);transform:rotate(8deg);box-shadow:0 8px 30px #0001}.section{padding:90px 10vw}.intro{text-align:center}.intro h2{font-size:clamp(36px,4vw,52px)}.intro-copy{max-width:650px;margin:25px auto;color:var(--muted);font-size:14px;line-height:2}.rule{display:block;width:55px;height:1px;background:var(--champ);margin:28px auto 14px}.caps{font-size:9px;letter-spacing:2px;color:var(--muted)}.portfolio{background:var(--ivory)}.section-head{display:flex;justify-content:space-between;align-items:end;margin-bottom:35px}.section-head h2{font-size:46px;margin:10px 0 0}.muted{font-size:12px;color:var(--muted);line-height:1.8}.portfolio-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}.empty{grid-column:1/-1;padding:55px;text-align:center;border:1px dashed #cbb9a7;color:var(--muted);font:italic 17px 'Playfair Display'}.portfolio-item{aspect-ratio:4/5;position:relative;overflow:hidden;background:#e4d6c8}.portfolio-item img{width:100%;height:100%;object-fit:cover;transition:.4s}.portfolio-item:hover img{transform:scale(1.04)}.portfolio-item p{position:absolute;bottom:0;left:0;right:0;margin:0;padding:30px 14px 14px;color:white;background:linear-gradient(transparent,#0008);font-size:12px}.service-grid{display:grid;grid-template-columns:1fr 1fr;gap:25px}.service{border:1px solid var(--line)}.service-cover{height:230px;position:relative;background:linear-gradient(135deg,#d9c5b2,#9f7f6d)}.service-cover:after{content:'';position:absolute;inset:15px;border:1px solid #fff8}.service-cover.wedding{background:linear-gradient(135deg,#d9c9bd,#94796b)}.service-cover span{position:absolute;z-index:1;left:28px;bottom:22px;color:white;font-size:10px;letter-spacing:2px}.service-content{padding:28px}.service-content h3{font:28px 'Playfair Display';margin:8px 0}.service-content p:not(.eyebrow){font-size:12px;line-height:1.8;color:var(--muted);min-height:40px}.price{font:25px 'Playfair Display';color:var(--brown);margin:20px 0}.booking{background:var(--ivory)}.legend{display:flex;gap:20px;flex-wrap:wrap;margin:20px 0;font-size:11px;color:var(--muted)}.legend span{display:flex;align-items:center;gap:7px}.legend i{width:8px;height:8px;border-radius:50%;display:inline-block}.available{background:var(--green)}.pending{background:var(--gold)}.booked{background:var(--red)}.blocked{background:#8d8984}.calendar-box{background:white;border:1px solid var(--line);padding:22px}.note,.hint{font-size:10px;line-height:1.8;color:var(--muted);margin-top:15px}.fc{font-family:'DM Sans',sans-serif;font-size:12px}.fc .fc-toolbar-title{font:24px 'Playfair Display'}.fc .fc-button-primary{background:var(--brown);border-color:var(--brown);font-size:11px}.fc-event{border:0!important;padding:2px 4px!important;font-size:10px!important}.event-pending{background:var(--gold)!important}.event-booked{background:var(--red)!important}.event-blocked{background:#8d8984!important}.footer{background:#4f3d33;color:#f8f1e9;padding:42px 10vw;display:grid;grid-template-columns:1fr 1fr auto;gap:18px;align-items:center}.footer .monogram{color:#f8f1e9}.footer p,.footer small{font-size:10px;letter-spacing:1px;color:#d8c8b9}.footer small{grid-column:1/-1;border-top:1px solid #ffffff26;padding-top:18px}.footer a{font-size:11px}.backdrop{display:none;position:fixed;inset:0;background:#21191499;z-index:50;align-items:center;justify-content:center;padding:18px;overflow:auto}.backdrop.open{display:flex}.modal{position:relative;background:var(--paper);width:min(560px,100%);max-height:94vh;overflow:auto;padding:36px}.modal.compact{width:min(420px,100%)}.modal h2{font-size:38px;margin:10px 0}.x{position:absolute;right:17px;top:10px;border:0;background:none;font-size:28px;color:var(--brown);cursor:pointer}form label{display:flex;flex-direction:column;gap:7px;font-size:11px;color:var(--brown);margin:12px 0}input,select,textarea{width:100%;padding:12px;border:1px solid var(--line);background:#fffdfa;color:var(--ink);font:12px 'DM Sans';outline:none}input:focus,select:focus,textarea:focus{border-color:var(--champ)}textarea{resize:vertical}.full{width:100%;margin-top:8px}.message{font-size:11px;color:var(--red);line-height:1.6}.admin-shortcut{position:fixed;right:18px;bottom:18px;width:38px;height:38px;border-radius:50%;border:1px solid #bda992;background:#fffdf9;color:var(--brown);z-index:25;cursor:pointer;opacity:.7}.dashboard{display:none;position:fixed;inset:0;background:#f8f4ee;z-index:60;overflow:auto;padding:32px 6vw}.dashboard.open{display:block}.dash-top,.panel-head{display:flex;align-items:center;justify-content:space-between}.dashboard h2{font-size:42px;margin:8px 0 24px}.tabs{display:flex;gap:8px;border-bottom:1px solid var(--line);margin:20px 0}.tab{border:0;background:none;padding:13px 17px;font:11px 'DM Sans';color:var(--muted);cursor:pointer}.tab.active{color:var(--brown);border-bottom:2px solid var(--brown)}.tab-panel{display:none;padding:15px 0}.tab-panel.active{display:block}.tab-panel h3{font:23px 'Playfair Display'}.requests{display:grid;gap:12px}.request{background:white;border:1px solid var(--line);padding:18px}.request h4{font:18px 'Playfair Display';margin:0 0 8px}.request p{font-size:11px;color:var(--muted);line-height:1.7}.request-actions{display:flex;gap:8px;flex-wrap:wrap}.request-actions button{padding:9px 12px;font-size:9px}.admin-form{background:white;border:1px solid var(--line);padding:20px;margin:15px 0}.admin-form h4{font:20px 'Playfair Display';margin:0 0 12px}.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 15px}.wide{grid-column:1/-1}.admin-portfolio{display:flex;gap:12px;flex-wrap:wrap;margin-top:15px}.admin-portfolio-item{width:120px}.admin-portfolio-item img{width:100%;height:95px;object-fit:cover}.admin-portfolio-item button{width:100%;padding:7px;font-size:9px}.close-dash{border:0;background:none;color:var(--brown);text-decoration:underline;cursor:pointer;margin:20px 0}
+@media(max-width:760px){.header{height:70px;padding:0 6vw}.hamb{display:block}nav{display:none;position:absolute;top:70px;left:0;right:0;padding:20px 6vw;background:var(--paper);flex-direction:column;gap:18px;border-bottom:1px solid var(--line)}nav.open{display:flex}.hero{padding:55px 7vw;grid-template-columns:1fr;gap:32px}.hero h1{font-size:48px}.hero-visual{height:320px}.section{padding:62px 7vw}.section-head{display:block}.section-head h2{font-size:38px}.section-head .muted{margin-top:12px}.portfolio-grid{grid-template-columns:1fr 1fr;gap:10px}.service-grid{grid-template-columns:1fr}.calendar-box{padding:8px}.fc .fc-toolbar{flex-wrap:wrap;gap:8px}.fc .fc-toolbar-title{font-size:19px}.footer{padding:32px 7vw;grid-template-columns:1fr 1fr}.footer>p{grid-column:1/-1}.modal{padding:30px 21px}.form-grid{grid-template-columns:1fr}.wide{grid-column:auto}.dashboard{padding:24px 5vw}.tabs{overflow:auto}.tab{white-space:nowrap;padding:12px}.request{padding:14px}}
+
+// Konfigurasi BYSL_MUA. Isi setelah membuat project Supabase.
+export const SUPABASE_URL = 'https://upkpohneqauolgdsxbqq.supabase.co';
+export const SUPABASE_ANON_KEY = 'sb_publishable_pM5Whmhcm2NnKDm5DWFgCA_7IQnk3Cx';
+export const BUSINESS_WHATSAPP = '6282337745252'; // kode negara 62, tanpa + atau spasi
+export const STORAGE_BUCKET = 'portfolio';
+
+{
+  "name": "bysl-mua-booking",
+  "version": "1.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "bysl-mua-booking",
+      "version": "1.0.0",
+      "devDependencies": {
+        "vite": "^6.0.0"
+      }
+    },
+    "node_modules/@esbuild/aix-ppc64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/aix-ppc64/-/aix-ppc64-0.25.12.tgz",
+      "integrity": "sha512-Hhmwd6CInZ3dwpuGTF8fJG6yoWmsToE+vYgD4nytZVxcu1ulHpUQRAB1UJ8+N1Am3Mz4+xOByoQoSZf4D+CpkA==",
+      "cpu": [
+        "ppc64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "aix"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/android-arm": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/android-arm/-/android-arm-0.25.12.tgz",
+      "integrity": "sha512-VJ+sKvNA/GE7Ccacc9Cha7bpS8nyzVv0jdVgwNDaR4gDMC/2TTRc33Ip8qrNYUcpkOHUT5OZ0bUcNNVZQ9RLlg==",
+      "cpu": [
+        "arm"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "android"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/android-arm64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/android-arm64/-/android-arm64-0.25.12.tgz",
+      "integrity": "sha512-6AAmLG7zwD1Z159jCKPvAxZd4y/VTO0VkprYy+3N2FtJ8+BQWFXU+OxARIwA46c5tdD9SsKGZ/1ocqBS/gAKHg==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "android"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/android-x64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/android-x64/-/android-x64-0.25.12.tgz",
+      "integrity": "sha512-5jbb+2hhDHx5phYR2By8GTWEzn6I9UqR11Kwf22iKbNpYrsmRB18aX/9ivc5cabcUiAT/wM+YIZ6SG9QO6a8kg==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "android"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/darwin-arm64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/darwin-arm64/-/darwin-arm64-0.25.12.tgz",
+      "integrity": "sha512-N3zl+lxHCifgIlcMUP5016ESkeQjLj/959RxxNYIthIg+CQHInujFuXeWbWMgnTo4cp5XVHqFPmpyu9J65C1Yg==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/darwin-x64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/darwin-x64/-/darwin-x64-0.25.12.tgz",
+      "integrity": "sha512-HQ9ka4Kx21qHXwtlTUVbKJOAnmG1ipXhdWTmNXiPzPfWKpXqASVcWdnf2bnL73wgjNrFXAa3yYvBSd9pzfEIpA==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/freebsd-arm64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/freebsd-arm64/-/freebsd-arm64-0.25.12.tgz",
+      "integrity": "sha512-gA0Bx759+7Jve03K1S0vkOu5Lg/85dou3EseOGUes8flVOGxbhDDh/iZaoek11Y8mtyKPGF3vP8XhnkDEAmzeg==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "freebsd"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/freebsd-x64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/freebsd-x64/-/freebsd-x64-0.25.12.tgz",
+      "integrity": "sha512-TGbO26Yw2xsHzxtbVFGEXBFH0FRAP7gtcPE7P5yP7wGy7cXK2oO7RyOhL5NLiqTlBh47XhmIUXuGciXEqYFfBQ==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "freebsd"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/linux-arm": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-arm/-/linux-arm-0.25.12.tgz",
+      "integrity": "sha512-lPDGyC1JPDou8kGcywY0YILzWlhhnRjdof3UlcoqYmS9El818LLfJJc3PXXgZHrHCAKs/Z2SeZtDJr5MrkxtOw==",
+      "cpu": [
+        "arm"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/linux-arm64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-arm64/-/linux-arm64-0.25.12.tgz",
+      "integrity": "sha512-8bwX7a8FghIgrupcxb4aUmYDLp8pX06rGh5HqDT7bB+8Rdells6mHvrFHHW2JAOPZUbnjUpKTLg6ECyzvas2AQ==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/linux-ia32": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-ia32/-/linux-ia32-0.25.12.tgz",
+      "integrity": "sha512-0y9KrdVnbMM2/vG8KfU0byhUN+EFCny9+8g202gYqSSVMonbsCfLjUO+rCci7pM0WBEtz+oK/PIwHkzxkyharA==",
+      "cpu": [
+        "ia32"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/linux-loong64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-loong64/-/linux-loong64-0.25.12.tgz",
+      "integrity": "sha512-h///Lr5a9rib/v1GGqXVGzjL4TMvVTv+s1DPoxQdz7l/AYv6LDSxdIwzxkrPW438oUXiDtwM10o9PmwS/6Z0Ng==",
+      "cpu": [
+        "loong64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/linux-mips64el": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-mips64el/-/linux-mips64el-0.25.12.tgz",
+      "integrity": "sha512-iyRrM1Pzy9GFMDLsXn1iHUm18nhKnNMWscjmp4+hpafcZjrr2WbT//d20xaGljXDBYHqRcl8HnxbX6uaA/eGVw==",
+      "cpu": [
+        "mips64el"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/linux-ppc64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-ppc64/-/linux-ppc64-0.25.12.tgz",
+      "integrity": "sha512-9meM/lRXxMi5PSUqEXRCtVjEZBGwB7P/D4yT8UG/mwIdze2aV4Vo6U5gD3+RsoHXKkHCfSxZKzmDssVlRj1QQA==",
+      "cpu": [
+        "ppc64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/linux-riscv64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-riscv64/-/linux-riscv64-0.25.12.tgz",
+      "integrity": "sha512-Zr7KR4hgKUpWAwb1f3o5ygT04MzqVrGEGXGLnj15YQDJErYu/BGg+wmFlIDOdJp0PmB0lLvxFIOXZgFRrdjR0w==",
+      "cpu": [
+        "riscv64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/linux-s390x": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-s390x/-/linux-s390x-0.25.12.tgz",
+      "integrity": "sha512-MsKncOcgTNvdtiISc/jZs/Zf8d0cl/t3gYWX8J9ubBnVOwlk65UIEEvgBORTiljloIWnBzLs4qhzPkJcitIzIg==",
+      "cpu": [
+        "s390x"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/linux-x64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.25.12.tgz",
+      "integrity": "sha512-uqZMTLr/zR/ed4jIGnwSLkaHmPjOjJvnm6TVVitAa08SLS9Z0VM8wIRx7gWbJB5/J54YuIMInDquWyYvQLZkgw==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/netbsd-arm64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/netbsd-arm64/-/netbsd-arm64-0.25.12.tgz",
+      "integrity": "sha512-xXwcTq4GhRM7J9A8Gv5boanHhRa/Q9KLVmcyXHCTaM4wKfIpWkdXiMog/KsnxzJ0A1+nD+zoecuzqPmCRyBGjg==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "netbsd"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/netbsd-x64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/netbsd-x64/-/netbsd-x64-0.25.12.tgz",
+      "integrity": "sha512-Ld5pTlzPy3YwGec4OuHh1aCVCRvOXdH8DgRjfDy/oumVovmuSzWfnSJg+VtakB9Cm0gxNO9BzWkj6mtO1FMXkQ==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "netbsd"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/openbsd-arm64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/openbsd-arm64/-/openbsd-arm64-0.25.12.tgz",
+      "integrity": "sha512-fF96T6KsBo/pkQI950FARU9apGNTSlZGsv1jZBAlcLL1MLjLNIWPBkj5NlSz8aAzYKg+eNqknrUJ24QBybeR5A==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "openbsd"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/openbsd-x64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/openbsd-x64/-/openbsd-x64-0.25.12.tgz",
+      "integrity": "sha512-MZyXUkZHjQxUvzK7rN8DJ3SRmrVrke8ZyRusHlP+kuwqTcfWLyqMOE3sScPPyeIXN/mDJIfGXvcMqCgYKekoQw==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "openbsd"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/openharmony-arm64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/openharmony-arm64/-/openharmony-arm64-0.25.12.tgz",
+      "integrity": "sha512-rm0YWsqUSRrjncSXGA7Zv78Nbnw4XL6/dzr20cyrQf7ZmRcsovpcRBdhD43Nuk3y7XIoW2OxMVvwuRvk9XdASg==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "openharmony"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/sunos-x64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/sunos-x64/-/sunos-x64-0.25.12.tgz",
+      "integrity": "sha512-3wGSCDyuTHQUzt0nV7bocDy72r2lI33QL3gkDNGkod22EsYl04sMf0qLb8luNKTOmgF/eDEDP5BFNwoBKH441w==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "sunos"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/win32-arm64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/win32-arm64/-/win32-arm64-0.25.12.tgz",
+      "integrity": "sha512-rMmLrur64A7+DKlnSuwqUdRKyd3UE7oPJZmnljqEptesKM8wx9J8gx5u0+9Pq0fQQW8vqeKebwNXdfOyP+8Bsg==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "win32"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/win32-ia32": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/win32-ia32/-/win32-ia32-0.25.12.tgz",
+      "integrity": "sha512-HkqnmmBoCbCwxUKKNPBixiWDGCpQGVsrQfJoVGYLPT41XWF8lHuE5N6WhVia2n4o5QK5M4tYr21827fNhi4byQ==",
+      "cpu": [
+        "ia32"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "win32"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@esbuild/win32-x64": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/@esbuild/win32-x64/-/win32-x64-0.25.12.tgz",
+      "integrity": "sha512-alJC0uCZpTFrSL0CCDjcgleBXPnCrEAhTBILpeAp7M/OFgoqtAetfBzX0xM00MUsVVPpVjlPuMbREqnZCXaTnA==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "win32"
+      ],
+      "engines": {
+        "node": ">=18"
+      }
+    },
+    "node_modules/@rollup/rollup-android-arm-eabi": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-android-arm-eabi/-/rollup-android-arm-eabi-4.68.0.tgz",
+      "integrity": "sha512-Ta2n0ntLfzP0LqwwcXOIh2z0mnHjlxMS+h4Y9lo+w33Quyf9KFKEi9QZ2IKqeEBKr0qxNpXc/DQjz5KVIs8AEA==",
+      "cpu": [
+        "arm"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "android"
+      ]
+    },
+    "node_modules/@rollup/rollup-android-arm64": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-android-arm64/-/rollup-android-arm64-4.68.0.tgz",
+      "integrity": "sha512-iFDtS0oMaBvKbtrRKXmRcBSsI0UaWL2bWpd62iHzb0A8RSPrVz47mUGE0CfrrD0c/7/7dUhNtoN3cc6aEUn1Ow==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "android"
+      ]
+    },
+    "node_modules/@rollup/rollup-android-x64": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-android-x64/-/rollup-android-x64-4.68.0.tgz",
+      "integrity": "sha512-OnYETr+cZYSbesBD1tCvUjrBUTkjSaOcewRUoIHqD0XI3yn5i9WpdFaE3LZwrMlq0yeJNU0N5sxfHK/fNVMqlQ==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "android"
+      ]
+    },
+    "node_modules/@rollup/rollup-darwin-arm64": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-darwin-arm64/-/rollup-darwin-arm64-4.68.0.tgz",
+      "integrity": "sha512-2qavWZtFeon/6oMkjsBF3OH7ENKgRTW4xRTwmz9VJeNUYhmPitpR9Jd4sAAc2OZJryHs2neoovMTCYnNvhvANQ==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "darwin"
+      ]
+    },
+    "node_modules/@rollup/rollup-darwin-x64": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-darwin-x64/-/rollup-darwin-x64-4.68.0.tgz",
+      "integrity": "sha512-QpgJO+GwNQDPt6uYcFSjZTFVyHNIeumN2am7RISDR9Nf3e/h8sur9cIfplPGihZPUn+sTw9j3JErZIUkHg8+Pw==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "darwin"
+      ]
+    },
+    "node_modules/@rollup/rollup-freebsd-arm64": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-freebsd-arm64/-/rollup-freebsd-arm64-4.68.0.tgz",
+      "integrity": "sha512-TERqEn6P9bp4lsTyoFjT3nLKV6G++76HhGb4k6dRGcs+jvhVcTGaS2zkeRdLLRjwKxpBtdCZe11kUQ2hNGgFSA==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "freebsd"
+      ]
+    },
+    "node_modules/@rollup/rollup-freebsd-x64": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-freebsd-x64/-/rollup-freebsd-x64-4.68.0.tgz",
+      "integrity": "sha512-RBjDrqb7h5l6Xgdgz5eKYvbpnUkii/z5ejWuZmHJsXORi0X0tTtFzEEgJj2DX995kW18c6T9LGFn/deEAMXDcQ==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "freebsd"
+      ]
+    },
+    "node_modules/@rollup/rollup-linux-arm-gnueabihf": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-linux-arm-gnueabihf/-/rollup-linux-arm-gnueabihf-4.68.0.tgz",
+      "integrity": "sha512-HtLgXBqjF1Ampt9eJjzSmoGDvNb4LP8Y2aPXQZeQ5qhyExXLmoXJB9Jfm/nPi/8fJ3UFn4sZ7pQKyr8V+oTN8g==",
+      "cpu": [
+        "arm"
+      ],
+      "dev": true,
+      "libc": [
+        "glibc"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ]
+    },
+    "node_modules/@rollup/rollup-linux-arm-musleabihf": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-linux-arm-musleabihf/-/rollup-linux-arm-musleabihf-4.68.0.tgz",
+      "integrity": "sha512-q51xJyqjaqCNtDjYD7xNVwsPa2TcVfAIBeP6E20wicKZ6XYp8Taz9SUPYhIENojAQIAoV7cO3mUdMUgWYEAuhQ==",
+      "cpu": [
+        "arm"
+      ],
+      "dev": true,
+      "libc": [
+        "musl"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ]
+    },
+    "node_modules/@rollup/rollup-linux-arm64-gnu": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-linux-arm64-gnu/-/rollup-linux-arm64-gnu-4.68.0.tgz",
+      "integrity": "sha512-wejnVabl92oFC/o4sr/EEJuJZMHtMq4C+LBIPphN4EUiVHe9qvZNw+biqhVHpX2ggs1+Z3ugXGwJxT+qhyaaYQ==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "libc": [
+        "glibc"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ]
+    },
+    "node_modules/@rollup/rollup-linux-arm64-musl": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-linux-arm64-musl/-/rollup-linux-arm64-musl-4.68.0.tgz",
+      "integrity": "sha512-tyu+hrsCWHHqV6+2tligV/recJH+HVvNV2Sp4nS1C+MKQPkNXRovKIzyHy0V0xXjm6igCLgsT2vTky5CvWP37g==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "libc": [
+        "musl"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ]
+    },
+    "node_modules/@rollup/rollup-linux-loong64-gnu": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-linux-loong64-gnu/-/rollup-linux-loong64-gnu-4.68.0.tgz",
+      "integrity": "sha512-5gjJNglKDfgs3OmnGi/RVZQPhEfRoCIHxwSAP9ngmdnxreu0Vl9lI4gxmFBXOhKdftpS82xRdc/7Dp5/A1F0qg==",
+      "cpu": [
+        "loong64"
+      ],
+      "dev": true,
+      "libc": [
+        "glibc"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ]
+    },
+    "node_modules/@rollup/rollup-linux-loong64-musl": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-linux-loong64-musl/-/rollup-linux-loong64-musl-4.68.0.tgz",
+      "integrity": "sha512-2IBxTUds33rFYwOIEyf77wfW8WQThwiQQ1ofXSraZQG7PiIq7BnQBf/ge0qEI/Ny/2cSc7SKkGO/wUDqmYXqTg==",
+      "cpu": [
+        "loong64"
+      ],
+      "dev": true,
+      "libc": [
+        "musl"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ]
+    },
+    "node_modules/@rollup/rollup-linux-ppc64-gnu": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-linux-ppc64-gnu/-/rollup-linux-ppc64-gnu-4.68.0.tgz",
+      "integrity": "sha512-mE/Pj2PPTZIVHkNNuHq+eYoU3td8LCm73zjrXoBWkNlnuULJS2l/fxwgGPpN4WUCNZgKZ1IXwrnnETPyOcWPmg==",
+      "cpu": [
+        "ppc64"
+      ],
+      "dev": true,
+      "libc": [
+        "glibc"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ]
+    },
+    "node_modules/@rollup/rollup-linux-ppc64-musl": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-linux-ppc64-musl/-/rollup-linux-ppc64-musl-4.68.0.tgz",
+      "integrity": "sha512-dYuykUkAiTv+RQdP3Ib47XcFiImkBWiRpTGSQWAMfZPQyoQYGe8Je4IUeZYNUQWIojmRCUnt5xsH4BbUb2uqSw==",
+      "cpu": [
+        "ppc64"
+      ],
+      "dev": true,
+      "libc": [
+        "musl"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ]
+    },
+    "node_modules/@rollup/rollup-linux-riscv64-gnu": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-linux-riscv64-gnu/-/rollup-linux-riscv64-gnu-4.68.0.tgz",
+      "integrity": "sha512-OnPDDFXLqJewY56T6ow8sA4wuzbqlliD7QJgkrx2KX+pWOpjI3usYXgB0pwK3nsgTF2odCw9IuJs0Uis/jy2qA==",
+      "cpu": [
+        "riscv64"
+      ],
+      "dev": true,
+      "libc": [
+        "glibc"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ]
+    },
+    "node_modules/@rollup/rollup-linux-riscv64-musl": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-linux-riscv64-musl/-/rollup-linux-riscv64-musl-4.68.0.tgz",
+      "integrity": "sha512-CqoQf06cK0brrRfDqH7Mt8G4MdteFGbjBdC61zEMaSVna6xo6QMUixa9bAkAD4a92g3ElPbQAkLMUzdf+Lk8dg==",
+      "cpu": [
+        "riscv64"
+      ],
+      "dev": true,
+      "libc": [
+        "musl"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ]
+    },
+    "node_modules/@rollup/rollup-linux-s390x-gnu": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-linux-s390x-gnu/-/rollup-linux-s390x-gnu-4.68.0.tgz",
+      "integrity": "sha512-LPHNmE8GwiyELGLUTkqj4zsP1YEHzGdtwnKxAcdP/swsNxXsfxPtpe5nrD/KGxr136xPB+eWv2r/SGj9md0pnQ==",
+      "cpu": [
+        "s390x"
+      ],
+      "dev": true,
+      "libc": [
+        "glibc"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ]
+    },
+    "node_modules/@rollup/rollup-linux-x64-gnu": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-linux-x64-gnu/-/rollup-linux-x64-gnu-4.68.0.tgz",
+      "integrity": "sha512-GDOmvgephpRCNyNGRQOZh0KD2gTyRVM1Bb1iOo759xeCUpCAoRCmJioOOSu2MwyWfNOocGd0V5I9vYLfteC6/A==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "libc": [
+        "glibc"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ]
+    },
+    "node_modules/@rollup/rollup-linux-x64-musl": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-linux-x64-musl/-/rollup-linux-x64-musl-4.68.0.tgz",
+      "integrity": "sha512-HADRxkvl5eg3hbemCmv81UwTfdQy/CiSJDOabLE+p5tpm3OTjuRtzpLXy5zPfGY9FQD4Qv7qHptXmG/YjmNmyw==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "libc": [
+        "musl"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ]
+    },
+    "node_modules/@rollup/rollup-openbsd-x64": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-openbsd-x64/-/rollup-openbsd-x64-4.68.0.tgz",
+      "integrity": "sha512-iERrpqu1VEfyX736HLKiXRbwGDkCV/iybARY/mn14KcI6oKhJGBx1e+bU+g+umTKghtiGSPaHkwwpII4/N3RjA==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "openbsd"
+      ]
+    },
+    "node_modules/@rollup/rollup-openharmony-arm64": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-openharmony-arm64/-/rollup-openharmony-arm64-4.68.0.tgz",
+      "integrity": "sha512-hBn57IqAbpXpyktckonwePTaFOQS6THph8ZnpRO3eZHY4LncuZGjSsseigBnKuSMKKpLnJJ7PemDvXEzniXC+A==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "openharmony"
+      ]
+    },
+    "node_modules/@rollup/rollup-win32-arm64-msvc": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-win32-arm64-msvc/-/rollup-win32-arm64-msvc-4.68.0.tgz",
+      "integrity": "sha512-pJWb7mIw9Z25Hl3Q6nHFjl7AnczfOpm2gbOFYguSRv6TiH7DzsoAk/thymb/URSQu9OUEK7uaDMC5Xfm+7TAww==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "win32"
+      ]
+    },
+    "node_modules/@rollup/rollup-win32-ia32-msvc": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-win32-ia32-msvc/-/rollup-win32-ia32-msvc-4.68.0.tgz",
+      "integrity": "sha512-pnrhmoyF2otH2Mezol14/ELUFGuRddOCz6+I+J0pq2Itnp4UxkjABQcXawCNMaKNsCRiuL90BtNzbEd0fHjpIg==",
+      "cpu": [
+        "ia32"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "win32"
+      ]
+    },
+    "node_modules/@rollup/rollup-win32-x64-gnu": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-win32-x64-gnu/-/rollup-win32-x64-gnu-4.68.0.tgz",
+      "integrity": "sha512-1dJ3U+ktdtaIdPaOZKwIX57+bKQk4iAjs5M1wQWLKRB6Wglp98qf8LUeuN4u6bGlIYouZKaySZJ5Qd4OalUMnA==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "win32"
+      ]
+    },
+    "node_modules/@rollup/rollup-win32-x64-msvc": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/@rollup/rollup-win32-x64-msvc/-/rollup-win32-x64-msvc-4.68.0.tgz",
+      "integrity": "sha512-e/NRJFl48wL5DFNSzQrvm4kaB5dzNNmqWjIJ6And2Sjuw4klO3w3TXMvCAEF1tHTrQQgpOD4QVkBE/92/yBGrQ==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "win32"
+      ]
+    },
+    "node_modules/@types/estree": {
+      "version": "1.0.10",
+      "resolved": "https://registry.npmjs.org/@types/estree/-/estree-1.0.10.tgz",
+      "integrity": "sha512-lTyOMnOcmRBzdCv6/4zUZCrEhV0xrqQiUZBZtVcbmLHBXKLnN8q89v/wKRF/Q0HbwVsqbIG3o5HDoFl9sduM+g==",
+      "dev": true,
+      "license": "MIT"
+    },
+    "node_modules/esbuild": {
+      "version": "0.25.12",
+      "resolved": "https://registry.npmjs.org/esbuild/-/esbuild-0.25.12.tgz",
+      "integrity": "sha512-bbPBYYrtZbkt6Os6FiTLCTFxvq4tt3JKall1vRwshA3fdVztsLAatFaZobhkBC8/BrPetoa0oksYoKXoG4ryJg==",
+      "dev": true,
+      "hasInstallScript": true,
+      "license": "MIT",
+      "bin": {
+        "esbuild": "bin/esbuild"
+      },
+      "engines": {
+        "node": ">=18"
+      },
+      "optionalDependencies": {
+        "@esbuild/aix-ppc64": "0.25.12",
+        "@esbuild/android-arm": "0.25.12",
+        "@esbuild/android-arm64": "0.25.12",
+        "@esbuild/android-x64": "0.25.12",
+        "@esbuild/darwin-arm64": "0.25.12",
+        "@esbuild/darwin-x64": "0.25.12",
+        "@esbuild/freebsd-arm64": "0.25.12",
+        "@esbuild/freebsd-x64": "0.25.12",
+        "@esbuild/linux-arm": "0.25.12",
+        "@esbuild/linux-arm64": "0.25.12",
+        "@esbuild/linux-ia32": "0.25.12",
+        "@esbuild/linux-loong64": "0.25.12",
+        "@esbuild/linux-mips64el": "0.25.12",
+        "@esbuild/linux-ppc64": "0.25.12",
+        "@esbuild/linux-riscv64": "0.25.12",
+        "@esbuild/linux-s390x": "0.25.12",
+        "@esbuild/linux-x64": "0.25.12",
+        "@esbuild/netbsd-arm64": "0.25.12",
+        "@esbuild/netbsd-x64": "0.25.12",
+        "@esbuild/openbsd-arm64": "0.25.12",
+        "@esbuild/openbsd-x64": "0.25.12",
+        "@esbuild/openharmony-arm64": "0.25.12",
+        "@esbuild/sunos-x64": "0.25.12",
+        "@esbuild/win32-arm64": "0.25.12",
+        "@esbuild/win32-ia32": "0.25.12",
+        "@esbuild/win32-x64": "0.25.12"
+      }
+    },
+    "node_modules/fdir": {
+      "version": "6.5.0",
+      "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+      "integrity": "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": ">=12.0.0"
+      },
+      "peerDependencies": {
+        "picomatch": "^3 || ^4"
+      },
+      "peerDependenciesMeta": {
+        "picomatch": {
+          "optional": true
+        }
+      }
+    },
+    "node_modules/fsevents": {
+      "version": "2.3.3",
+      "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
+      "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
+      "dev": true,
+      "hasInstallScript": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "engines": {
+        "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+      }
+    },
+    "node_modules/nanoid": {
+      "version": "3.3.20",
+      "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+      "integrity": "sha512-uKdg2G3GNCKQn9byYOpxbGqrT2fGO5KRt5J/8b3pok8rT6qxGWF6hxMyJiEYtAf+FVyYuD9hRaDqX5uPFYJ4ZQ==",
+      "dev": true,
+      "funding": [
+        {
+          "type": "github",
+          "url": "https://github.com/sponsors/ai"
+        }
+      ],
+      "license": "MIT",
+      "bin": {
+        "nanoid": "bin/nanoid.cjs"
+      },
+      "engines": {
+        "node": "^10 || ^12 || ^13.7 || ^14 || >=15.0.1"
+      }
+    },
+    "node_modules/picocolors": {
+      "version": "1.1.1",
+      "resolved": "https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz",
+      "integrity": "sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==",
+      "dev": true,
+      "license": "ISC"
+    },
+    "node_modules/picomatch": {
+      "version": "4.0.7",
+      "resolved": "https://registry.npmjs.org/picomatch/-/picomatch-4.0.7.tgz",
+      "integrity": "sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": ">=12"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/jonschlinkert"
+      }
+    },
+    "node_modules/postcss": {
+      "version": "8.5.32",
+      "resolved": "https://registry.npmjs.org/postcss/-/postcss-8.5.32.tgz",
+      "integrity": "sha512-LJlKCCAUFKOuZxipUdYw1NzIITEsPcgyOG9LkvRJvuKj/bRzbuRY0ARXvL0pWGpsZvn8jku+LMep2eU0seHp8g==",
+      "dev": true,
+      "funding": [
+        {
+          "type": "opencollective",
+          "url": "https://opencollective.com/postcss/"
+        },
+        {
+          "type": "tidelift",
+          "url": "https://tidelift.com/funding/github/npm/postcss"
+        },
+        {
+          "type": "github",
+          "url": "https://github.com/sponsors/ai"
+        }
+      ],
+      "license": "MIT",
+      "dependencies": {
+        "nanoid": "^3.3.20",
+        "picocolors": "^1.1.1",
+        "source-map-js": "^1.2.2"
+      },
+      "engines": {
+        "node": "^10 || ^12 || >=14"
+      }
+    },
+    "node_modules/rollup": {
+      "version": "4.68.0",
+      "resolved": "https://registry.npmjs.org/rollup/-/rollup-4.68.0.tgz",
+      "integrity": "sha512-BIHWnc1Qjdy+WLfOdcSd67sxO4iW6pTnhdZosg+7ywSaiMWxxzKldkkNpUJqeXYAiJzyB14P2cIjqC6tlb6xzw==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "@types/estree": "^1.0.10"
+      },
+      "bin": {
+        "rollup": "dist/bin/rollup"
+      },
+      "engines": {
+        "node": ">=18.0.0",
+        "npm": ">=8.0.0"
+      },
+      "optionalDependencies": {
+        "@rollup/rollup-android-arm-eabi": "4.68.0",
+        "@rollup/rollup-android-arm64": "4.68.0",
+        "@rollup/rollup-android-x64": "4.68.0",
+        "@rollup/rollup-darwin-arm64": "4.68.0",
+        "@rollup/rollup-darwin-x64": "4.68.0",
+        "@rollup/rollup-freebsd-arm64": "4.68.0",
+        "@rollup/rollup-freebsd-x64": "4.68.0",
+        "@rollup/rollup-linux-arm-gnueabihf": "4.68.0",
+        "@rollup/rollup-linux-arm-musleabihf": "4.68.0",
+        "@rollup/rollup-linux-arm64-gnu": "4.68.0",
+        "@rollup/rollup-linux-arm64-musl": "4.68.0",
+        "@rollup/rollup-linux-loong64-gnu": "4.68.0",
+        "@rollup/rollup-linux-loong64-musl": "4.68.0",
+        "@rollup/rollup-linux-ppc64-gnu": "4.68.0",
+        "@rollup/rollup-linux-ppc64-musl": "4.68.0",
+        "@rollup/rollup-linux-riscv64-gnu": "4.68.0",
+        "@rollup/rollup-linux-riscv64-musl": "4.68.0",
+        "@rollup/rollup-linux-s390x-gnu": "4.68.0",
+        "@rollup/rollup-linux-x64-gnu": "4.68.0",
+        "@rollup/rollup-linux-x64-musl": "4.68.0",
+        "@rollup/rollup-openbsd-x64": "4.68.0",
+        "@rollup/rollup-openharmony-arm64": "4.68.0",
+        "@rollup/rollup-win32-arm64-msvc": "4.68.0",
+        "@rollup/rollup-win32-ia32-msvc": "4.68.0",
+        "@rollup/rollup-win32-x64-gnu": "4.68.0",
+        "@rollup/rollup-win32-x64-msvc": "4.68.0",
+        "fsevents": "~2.3.2"
+      }
+    },
+    "node_modules/source-map-js": {
+      "version": "1.2.2",
+      "resolved": "https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.2.tgz",
+      "integrity": "sha512-KGj/8Y43x35aZVDtt+J4mK1hoLGHULMYfSkODJNQjNDC3oW1PqPoxMwo0pLUsWM/UEGzON/NxeHywEfNXNP3Vw==",
+      "dev": true,
+      "license": "BSD-3-Clause",
+      "engines": {
+        "node": ">=0.10.0"
+      }
+    },
+    "node_modules/tinyglobby": {
+      "version": "0.2.17",
+      "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+      "integrity": "sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "fdir": "^6.5.0",
+        "picomatch": "^4.0.4"
+      },
+      "engines": {
+        "node": ">=12.0.0"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/SuperchupuDev"
+      }
+    },
+    "node_modules/vite": {
+      "version": "6.4.5",
+      "resolved": "https://registry.npmjs.org/vite/-/vite-6.4.5.tgz",
+      "integrity": "sha512-4enwjFfi4IwtEh0w+jPzpLVOFQiPHmmzPxcHXQOyEur47o6u0jE573DmGpjA+7irXoMLYRZD5ZaFUEneS3abPg==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "esbuild": "^0.25.0",
+        "fdir": "^6.4.4",
+        "picomatch": "^4.0.2",
+        "postcss": "^8.5.3",
+        "rollup": "^4.34.9",
+        "tinyglobby": "^0.2.13"
+      },
+      "bin": {
+        "vite": "bin/vite.js"
+      },
+      "engines": {
+        "node": "^18.0.0 || ^20.0.0 || >=22.0.0"
+      },
+      "funding": {
+        "url": "https://github.com/vitejs/vite?sponsor=1"
+      },
+      "optionalDependencies": {
+        "fsevents": "~2.3.3"
+      },
+      "peerDependencies": {
+        "@types/node": "^18.0.0 || ^20.0.0 || >=22.0.0",
+        "jiti": ">=1.21.0",
+        "less": "*",
+        "lightningcss": "^1.21.0",
+        "sass": "*",
+        "sass-embedded": "*",
+        "stylus": "*",
+        "sugarss": "*",
+        "terser": "^5.16.0",
+        "tsx": "^4.8.1",
+        "yaml": "^2.4.2"
+      },
+      "peerDependenciesMeta": {
+        "@types/node": {
+          "optional": true
+        },
+        "jiti": {
+          "optional": true
+        },
+        "less": {
+          "optional": true
+        },
+        "lightningcss": {
+          "optional": true
+        },
+        "sass": {
+          "optional": true
+        },
+        "sass-embedded": {
+          "optional": true
+        },
+        "stylus": {
+          "optional": true
+        },
+        "sugarss": {
+          "optional": true
+        },
+        "terser": {
+          "optional": true
+        },
+        "tsx": {
+          "optional": true
+        },
+        "yaml": {
+          "optional": true
+        }
+      }
+    }
+  }
+}
