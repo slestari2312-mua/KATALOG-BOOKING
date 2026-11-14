@@ -34,3 +34,4 @@
 
 ## Build
 `vite.config.js` menetapkan target ES2022 agar top-level `await` di `app.js` didukung. Jalankan `npm install` lalu `npm run build` sebelum deploy. Pengujian build belum bisa diverifikasi dalam lingkungan ini jika instalasi dependensi gagal.
+Pengujian deployment BYSL MUA Booking V2 - 14 November 2026
